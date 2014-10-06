@@ -1,0 +1,10 @@
+# File locations on AWS instance
+---
+inputs:
+  namere: 'DS-15\d+'
+  regions: /home/ubuntu/color_panel_21.bed
+  vcfs: /encrypted/bams/vcfs/*DS-15*vcf.gz
+  bams: /encrypted/bams/bams/*DS-15*.bam
+dirs:
+  work: /encrypted/bams/work
+  
