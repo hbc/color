@@ -3,6 +3,7 @@
 """
 import collections
 import glob
+import gzip
 import pprint
 import os
 import re
@@ -10,23 +11,68 @@ import subprocess
 import sys
 
 import toolz as tz
+import numpy
 import yaml
 
 from bcbio import utils
 from bcbio.distributed.transaction import file_transaction
 from bcbio.provenance import do
-from bcbio.variation import vcfutils
+from bcbio.variation import bedutils, vcfutils
 
 def main(config_file):
     with open(config_file) as in_handle:
         config = yaml.load(in_handle)
+    config["config"] = {}
     groups = organize_vcf_reps(glob.glob(tz.get_in(["inputs", "vcfs"], config)),
                                tz.get_in(["inputs", "namere"], config))
     groups = add_bams(glob.glob(tz.get_in(["inputs", "bams"], config)),
                       tz.get_in(["inputs", "namere"], config), groups)
+    bed_file = bedutils.clean_file(tz.get_in(["inputs", "regions"], config), config) + ".gz"
     with utils.chdir(tz.get_in(["dirs", "work"], config)):
         groups = preprocess_vcfs(groups)
-    pprint.pprint(groups)
+        pprint.pprint(groups)
+        incon = {}
+        for name, fnames in groups.items():
+            incon[name] = find_inconsistent(name, fnames["vcf"], bed_file)
+        for name, info in sorted(incon.items(), key=lambda x: numpy.mean(x[1]["counts"])):
+            print name, info["counts"]
+
+# ## Comparisons
+
+def find_inconsistent(name, vcf_files, bed_file):
+    """Find inconsistent calls in provided regions of interest for each group.
+    """
+    cmp_dir = utils.safe_makedir(os.path.join(os.getcwd(), "compare", name))
+    isec_dir = os.path.join(cmp_dir, "isec")
+    vcf_files_str = " ".join(vcf_files)
+    target_count = len(vcf_files) - 1
+    if not os.path.exists(isec_dir):
+        with file_transaction({}, isec_dir) as tx_isec_dir:
+            cmd = ("bcftools isec {vcf_files_str} -R {bed_file} "
+                   "-n -{target_count} -p {tx_isec_dir} -O z")
+            do.run(cmd.format(**locals()), "Intersection finding non-consistent calls")
+    _calculate_summary(vcf_files, bed_file, cmp_dir)
+    inconsistent = []
+    for i in range(len(vcf_files)):
+        with gzip.open(os.path.join(isec_dir, "%04d.vcf.gz" % i)) as in_handle:
+            inconsistent.append(sum(1 for l in in_handle if not l.startswith("#")))
+    return {"counts": inconsistent}
+
+def _calculate_summary(vcf_files, bed_file, cmp_dir):
+    """Summarize all variants called in the VCF files as a bcftools isec output file.
+    """
+    file_list = os.path.join(cmp_dir, "input_files.txt")
+    if not utils.file_exists(file_list):
+        with file_transaction({}, file_list) as tx_out_file:
+            with open(tx_out_file, "w") as out_handle:
+                out_handle.write("\n".join(vcf_files))
+    out_file = os.path.join(cmp_dir, "all_variants.txt")
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            vcf_files_str = " ".join(vcf_files)
+            cmd = ("bcftools isec -n '+1' -o {tx_out_file} -R {bed_file} {vcf_files_str}")
+            do.run(cmd.format(**locals()), "Variant comparison summary")
+    return out_file
 
 # ## Pre-processing
 
