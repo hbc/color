@@ -11,7 +11,8 @@ import subprocess
 import sys
 
 import toolz as tz
-import numpy
+import numpy as np
+from scipy.cluster import vq
 import yaml
 
 from bcbio import utils
@@ -34,8 +35,27 @@ def main(config_file):
         incon = {}
         for name, fnames in groups.items():
             incon[name] = find_inconsistent(name, fnames["vcf"], bed_file)
-        for name, info in sorted(incon.items(), key=lambda x: numpy.mean(x[1]["counts"])):
+        for name, info in sorted(incon.items(), key=lambda x: np.mean(x[1]["counts"]), reverse=True):
             print name, info["counts"]
+            if np.mean(info["counts"]) > 100:
+                investigate_high_counts(info["summary"], info["vcf_files"])
+
+# ## Investigate comparison problems
+
+def investigate_high_counts(summary_file, vcf_files):
+    counts = []
+    with open(summary_file) as in_handle:
+        for line in in_handle:
+            calls = [int(x) for x in list(line.strip("\n").split("\t")[-1])]
+            counts.append(calls)
+    data = np.array(counts).transpose()
+    centroids = vq.kmeans(data, 2)[0]
+    codes = vq.vq(data, centroids)[0]
+    # http://stackoverflow.com/questions/1518522/python-most-common-element-in-a-list
+    common_code = max(set(codes), key=list(codes).count)
+    for code, vcf_file in zip(codes, vcf_files):
+        if code != common_code:
+            print " -", os.path.basename(vcf_file)
 
 # ## Comparisons
 
@@ -51,12 +71,14 @@ def find_inconsistent(name, vcf_files, bed_file):
             cmd = ("bcftools isec {vcf_files_str} -R {bed_file} "
                    "-n -{target_count} -p {tx_isec_dir} -O z")
             do.run(cmd.format(**locals()), "Intersection finding non-consistent calls")
-    _calculate_summary(vcf_files, bed_file, cmp_dir)
+    isec_summary = _calculate_summary(vcf_files, bed_file, cmp_dir)
     inconsistent = []
     for i in range(len(vcf_files)):
         with gzip.open(os.path.join(isec_dir, "%04d.vcf.gz" % i)) as in_handle:
             inconsistent.append(sum(1 for l in in_handle if not l.startswith("#")))
-    return {"counts": inconsistent}
+    return {"counts": inconsistent,
+            "vcf_files": vcf_files,
+            "summary": isec_summary}
 
 def _calculate_summary(vcf_files, bed_file, cmp_dir):
     """Summarize all variants called in the VCF files as a bcftools isec output file.
