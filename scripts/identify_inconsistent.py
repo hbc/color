@@ -25,9 +25,9 @@ def main(config_file):
         config = yaml.load(in_handle)
     config["config"] = {}
     groups = organize_vcf_reps(glob.glob(tz.get_in(["inputs", "vcfs"], config)),
-                               tz.get_in(["inputs", "namere"], config))
+                               tz.get_in(["inputs", "namere"], config), config["remap"])
     groups = add_bams(glob.glob(tz.get_in(["inputs", "bams"], config)),
-                      tz.get_in(["inputs", "namere"], config), groups)
+                      tz.get_in(["inputs", "namere"], config), groups, config["remap"])
     bed_file = bedutils.clean_file(tz.get_in(["inputs", "regions"], config), config) + ".gz"
     with utils.chdir(tz.get_in(["dirs", "work"], config)):
         groups = preprocess_vcfs(groups)
@@ -35,12 +35,40 @@ def main(config_file):
         incon = {}
         for name, fnames in groups.items():
             incon[name] = find_inconsistent(name, fnames["vcf"], bed_file)
+        incon_check = []
         for name, info in sorted(incon.items(), key=lambda x: np.mean(x[1]["counts"]), reverse=True):
             print name, info["counts"]
             if np.mean(info["counts"]) > 100:
-                investigate_high_counts(info["summary"], info["vcf_files"])
+                incon_check.extend(investigate_high_counts(info["summary"], info["vcf_files"]))
+        for to_check in incon_check:
+            deconvolute_inconsistent(to_check, groups, bed_file)
 
 # ## Investigate comparison problems
+
+def deconvolute_inconsistent(problem_vcf, groups, bed_file):
+    """Identify correct sample classification for problematic VCF.
+    """
+    cmps = []
+    for name, info in groups.items():
+        for cmp_vcf in info["vcf"]:
+            if cmp_vcf != problem_vcf:
+                concordant = _count_concordant(problem_vcf, cmp_vcf, bed_file)
+                cmps.append((concordant, cmp_vcf))
+    cmps.sort(reverse=True)
+    print problem_vcf
+    for x in cmps[:5]:
+        print " -", x
+
+def _count_concordant(orig_vcf, cmp_vcf, bed_file):
+    """Identify concordant calls between two VCF files.
+    """
+    cmd = ("bcftools gtcheck --GTs-only 1 --regions-file {bed_file} "
+           "--genotypes {cmp_vcf} {orig_vcf} 2> /dev/null")
+    bout = subprocess.check_output(cmd.format(**locals()), shell=True)
+    parts = bout.split("\n")[-2].split()
+    discordant = int(float(parts[1]))
+    total = int(parts[3])
+    return total - discordant
 
 def investigate_high_counts(summary_file, vcf_files):
     counts = []
@@ -53,9 +81,12 @@ def investigate_high_counts(summary_file, vcf_files):
     codes = vq.vq(data, centroids)[0]
     # http://stackoverflow.com/questions/1518522/python-most-common-element-in-a-list
     common_code = max(set(codes), key=list(codes).count)
+    problems = []
     for code, vcf_file in zip(codes, vcf_files):
         if code != common_code:
             print " -", os.path.basename(vcf_file)
+            problems.append(vcf_file)
+    return problems
 
 # ## Comparisons
 
@@ -123,12 +154,15 @@ def _prep_vcf(in_file, out_file):
 
 # ## Get files to work on
 
-def add_bams(bam_files, name_re, groups):
+def add_bams(bam_files, name_re, groups, remap):
     """Add BAM information existing grouped VCFs.
     """
     pat = re.compile(name_re)
     for bam_file in bam_files:
-        name = pat.search(os.path.basename(bam_file)).group(0)
+        try:
+            name = remap[utils.splitext_plus(os.path.basename(bam_file))[0]]
+        except KeyError:
+            name = pat.search(os.path.basename(bam_file)).group(0)
         if name in groups:
             cur_group = groups[name]
             try:
@@ -138,13 +172,16 @@ def add_bams(bam_files, name_re, groups):
             groups[name] = cur_group
     return groups
 
-def organize_vcf_reps(vcf_files, name_re):
+def organize_vcf_reps(vcf_files, name_re, remap):
     """Retrieve VCFs analyzed as replicates.
     """
     pat = re.compile(name_re)
     by_name = collections.defaultdict(list)
     for vcf_file in vcf_files:
-        name = pat.search(os.path.basename(vcf_file)).group(0)
+        try:
+            name = remap[utils.splitext_plus(os.path.basename(vcf_file))[0]]
+        except KeyError:
+            name = pat.search(os.path.basename(vcf_file)).group(0)
         by_name[name].append(vcf_file)
     out = {}
     for name, vcfs in by_name.items():

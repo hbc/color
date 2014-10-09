@@ -1,5 +1,5 @@
-# File locations on AWS instance
 ---
+# File locations on AWS instance
 inputs:
   namere: 'DS-15\d+'
   regions: /home/ubuntu/color_panel_21.bed
@@ -7,4 +7,13 @@ inputs:
   bams: /encrypted/bams/bams/*DS-15*.bam
 dirs:
   work: /encrypted/bams/work
-  
+# Swapped files and group names
+remap:
+  BH9TK7ADXX_DS-159807_AAGGTAC: DS-159815
+  BH9TK7ADXX_DS-159807_ACGTATC: DS-159815
+  BH9TK7ADXX_DS-159822_ACTATGC: DS-156119
+  BH9TK7ADXX_DS-159822_ACACAGA: DS-156119
+  BH9TK7ADXX_DS-159813_ACAGCAG: DS-159807
+  BH9TK7ADXX_DS-159813_AGAGTCA: DS-159807
+  BH9TK7ADXX_DS-159815_ACCTCCA: DS-159822
+  BH9TK7ADXX_DS-156119_ACGCTCG: DS-159813
