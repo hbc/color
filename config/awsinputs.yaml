@@ -7,6 +7,11 @@ inputs:
   bams: /encrypted/bams/bams/*DS-15*.bam
 dirs:
   work: /encrypted/bams/work
+annotations:
+  segdup: /home/ubuntu/brad/regions/GRCh37.segdup.bed.gz
+  rmsk: /home/ubuntu/brad/regions/GRCh37.rmsk.bed.gz
+  lcr: /home/ubuntu/brad/regions/LCR.bed.gz
+  # grc_patch: /home/ubuntu/brad/regions/GRC_patch_regions.bed.gz
 # Swapped files and group names
 remap:
   BH9TK7ADXX_DS-159807_AAGGTAC: DS-159815

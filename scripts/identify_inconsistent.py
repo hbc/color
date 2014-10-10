@@ -42,6 +42,133 @@ def main(config_file):
                 incon_check.extend(investigate_high_counts(info["summary"], info["vcf_files"]))
         for to_check in incon_check:
             deconvolute_inconsistent(to_check, groups, bed_file)
+        disc_bed = identify_shared_discordants(incon)
+        ann_bed = annotate_disc_bed(disc_bed, config["annotations"])
+        check_annotated_disc(ann_bed, config["annotations"])
+        print ann_bed
+
+# ## Shared discordant variants
+
+def check_annotated_disc(in_file, annotations):
+    ann_count = len(annotations)
+    explained = collections.defaultdict(int)
+    remain = 0
+    total = 0
+    with open(in_file) as in_handle:
+        for line in (l for l in in_handle if not l.startswith("#")):
+            parts = line.rstrip().split("\t")
+            anns = [float(x) for x in parts[-ann_count:]]
+            lineid = parts[:-ann_count]
+            gotit = False
+            for i, val in enumerate(anns):
+                if val > 0:
+                    explained[i] += 1
+                    gotit = True
+            if not gotit:
+                remain += 1
+                size = int(lineid[2]) - int(lineid[1])
+                print size, lineid
+            total += 1
+    print remain, total, dict(explained)
+
+def annotate_disc_bed(in_file, annotations):
+    """Annotate a BED file with potential causes from genomic regions.
+    """
+    out_file = "%s-annotate.bed" % utils.splitext_plus(in_file)[0]
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            names, files = [], []
+            for name, fname in annotations.items():
+                names.append(name)
+                files.append(fname)
+            names_str = " ".join(names)
+            files_str = " ".join(files)
+            cmd = ("bedtools annotate -i {in_file} -files {files_str} "
+                   "-names {names_str} > {tx_out_file}")
+            do.run(cmd.format(**locals()), "Annotate discordant regions")
+    return out_file
+
+def identify_shared_discordants(incon):
+    """Identify discordant variants shared in multiple samples.
+
+    Looks for pervasive issues likely due to algorithmic/genome representation issues.
+    Create a BED file of discordant calls and then merge these to identify regions.
+    """
+    dis_beds = [_isec_summary_to_bed(info["summary"], name)
+                for name, info in incon.items()]
+    work_dir = utils.safe_makedir(os.path.join(os.getcwd(), "cmpsum"))
+    merge_disc_bed = _merge_discordant_beds(dis_beds, work_dir)
+    return merge_disc_bed
+
+def _merge_discordant_beds(bed_files, work_dir):
+    out_file = os.path.join(work_dir, "discordant-merged.bed")
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            bed_files_str = " ".join(bed_files)
+            cmd = ("cat {bed_files_str} | sort -k1,1 -k2,2n | "
+                   "bedtools merge -d 100 -c 4 -o distinct -i - > {tx_out_file}")
+            do.run(cmd.format(**locals()), "Merge discordant regions")
+    return out_file
+
+def _isec_summary_to_bed(isec_file, name):
+    out_file = "%s-discordant.bed" % utils.splitext_plus(isec_file)[0]
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            with open(isec_file) as in_handle:
+                with open(out_file, "w") as out_handle:
+                    for line in in_handle:
+                        dline = _prep_discordant_line(line, name)
+                        if dline:
+                            out_handle.write("\t".join(str(x) for x in dline) + "\n")
+    return out_file
+
+def _prep_discordant_line(line, name):
+    """Prepare information on a line from intersection if discordant.
+    """
+    chrom, start, ref, alt, cmpstr = line.strip().split()
+    if len(set(list(cmpstr))) > 1:
+        start = int(start) - 1
+        size = max(len(x) for x in [ref] + alt.split(","))
+        return [chrom, start, start + size, name]
+
+# ## Comparisons
+
+def find_inconsistent(name, vcf_files, bed_file):
+    """Find inconsistent calls in provided regions of interest for each group.
+    """
+    cmp_dir = utils.safe_makedir(os.path.join(os.getcwd(), "compare", name))
+    isec_dir = os.path.join(cmp_dir, "isec")
+    vcf_files_str = " ".join(vcf_files)
+    target_count = len(vcf_files) - 1
+    if not os.path.exists(isec_dir):
+        with file_transaction({}, isec_dir) as tx_isec_dir:
+            cmd = ("bcftools isec {vcf_files_str} -R {bed_file} "
+                   "-n -{target_count} -p {tx_isec_dir} -O z")
+            do.run(cmd.format(**locals()), "Intersection finding non-consistent calls")
+    isec_summary = _calculate_summary(vcf_files, bed_file, cmp_dir)
+    inconsistent = []
+    for i in range(len(vcf_files)):
+        with gzip.open(os.path.join(isec_dir, "%04d.vcf.gz" % i)) as in_handle:
+            inconsistent.append(sum(1 for l in in_handle if not l.startswith("#")))
+    return {"counts": inconsistent,
+            "vcf_files": vcf_files,
+            "summary": isec_summary}
+
+def _calculate_summary(vcf_files, bed_file, cmp_dir):
+    """Summarize all variants called in the VCF files as a bcftools isec output file.
+    """
+    file_list = os.path.join(cmp_dir, "input_files.txt")
+    if not utils.file_exists(file_list):
+        with file_transaction({}, file_list) as tx_out_file:
+            with open(tx_out_file, "w") as out_handle:
+                out_handle.write("\n".join(vcf_files))
+    out_file = os.path.join(cmp_dir, "all_variants.txt")
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            vcf_files_str = " ".join(vcf_files)
+            cmd = ("bcftools isec -n '+1' -o {tx_out_file} -R {bed_file} {vcf_files_str}")
+            do.run(cmd.format(**locals()), "Variant comparison summary")
+    return out_file
 
 # ## Investigate comparison problems
 
@@ -88,44 +215,6 @@ def investigate_high_counts(summary_file, vcf_files):
             problems.append(vcf_file)
     return problems
 
-# ## Comparisons
-
-def find_inconsistent(name, vcf_files, bed_file):
-    """Find inconsistent calls in provided regions of interest for each group.
-    """
-    cmp_dir = utils.safe_makedir(os.path.join(os.getcwd(), "compare", name))
-    isec_dir = os.path.join(cmp_dir, "isec")
-    vcf_files_str = " ".join(vcf_files)
-    target_count = len(vcf_files) - 1
-    if not os.path.exists(isec_dir):
-        with file_transaction({}, isec_dir) as tx_isec_dir:
-            cmd = ("bcftools isec {vcf_files_str} -R {bed_file} "
-                   "-n -{target_count} -p {tx_isec_dir} -O z")
-            do.run(cmd.format(**locals()), "Intersection finding non-consistent calls")
-    isec_summary = _calculate_summary(vcf_files, bed_file, cmp_dir)
-    inconsistent = []
-    for i in range(len(vcf_files)):
-        with gzip.open(os.path.join(isec_dir, "%04d.vcf.gz" % i)) as in_handle:
-            inconsistent.append(sum(1 for l in in_handle if not l.startswith("#")))
-    return {"counts": inconsistent,
-            "vcf_files": vcf_files,
-            "summary": isec_summary}
-
-def _calculate_summary(vcf_files, bed_file, cmp_dir):
-    """Summarize all variants called in the VCF files as a bcftools isec output file.
-    """
-    file_list = os.path.join(cmp_dir, "input_files.txt")
-    if not utils.file_exists(file_list):
-        with file_transaction({}, file_list) as tx_out_file:
-            with open(tx_out_file, "w") as out_handle:
-                out_handle.write("\n".join(vcf_files))
-    out_file = os.path.join(cmp_dir, "all_variants.txt")
-    if not utils.file_exists(out_file):
-        with file_transaction({}, out_file) as tx_out_file:
-            vcf_files_str = " ".join(vcf_files)
-            cmd = ("bcftools isec -n '+1' -o {tx_out_file} -R {bed_file} {vcf_files_str}")
-            do.run(cmd.format(**locals()), "Variant comparison summary")
-    return out_file
 
 # ## Pre-processing
 
