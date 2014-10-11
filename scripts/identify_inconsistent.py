@@ -10,6 +10,7 @@ import re
 import subprocess
 import sys
 
+import pybedtools
 import toolz as tz
 import numpy as np
 from scipy.cluster import vq
@@ -45,31 +46,10 @@ def main(config_file):
         disc_bed = identify_shared_discordants(incon)
         ann_bed = annotate_disc_bed(disc_bed, config["annotations"])
         check_annotated_disc(ann_bed, config["annotations"])
+        calculate_annotation_overlap(bed_file, config["annotations"])
         print ann_bed
 
-# ## Shared discordant variants
-
-def check_annotated_disc(in_file, annotations):
-    ann_count = len(annotations)
-    explained = collections.defaultdict(int)
-    remain = 0
-    total = 0
-    with open(in_file) as in_handle:
-        for line in (l for l in in_handle if not l.startswith("#")):
-            parts = line.rstrip().split("\t")
-            anns = [float(x) for x in parts[-ann_count:]]
-            lineid = parts[:-ann_count]
-            gotit = False
-            for i, val in enumerate(anns):
-                if val > 0:
-                    explained[i] += 1
-                    gotit = True
-            if not gotit:
-                remain += 1
-                size = int(lineid[2]) - int(lineid[1])
-                print size, lineid
-            total += 1
-    print remain, total, dict(explained)
+# ## External annotations
 
 def annotate_disc_bed(in_file, annotations):
     """Annotate a BED file with potential causes from genomic regions.
@@ -87,6 +67,51 @@ def annotate_disc_bed(in_file, annotations):
                    "-names {names_str} > {tx_out_file}")
             do.run(cmd.format(**locals()), "Annotate discordant regions")
     return out_file
+
+def check_annotated_disc(in_file, annotations):
+    """Provide statistics on discordant variants removed by annotations.
+    """
+    ann_count = len(annotations)
+    explained = collections.defaultdict(int)
+    remain = 0
+    total = 0
+    header = []
+    with open(in_file) as in_handle:
+        for line in in_handle:
+            parts = line.rstrip().split("\t")
+            lineid = parts[:-ann_count]
+            if line.startswith("#"):
+                anns = parts[-ann_count:]
+                header = anns
+            else:
+                anns = [float(x) for x in parts[-ann_count:]]
+                assert len(header) > 0
+                gotit = False
+                for i, val in enumerate(anns):
+                    ann_name = header[i]
+                    if val > 0:
+                        explained[ann_name] += 1
+                        gotit = True
+                if not gotit:
+                    remain += 1
+                    size = int(lineid[2]) - int(lineid[1])
+                    print size, lineid
+                total += 1
+    print remain, total, dict(explained)
+
+def calculate_annotation_overlap(orig_bed, annotations):
+    """Calculate amount of original BED file falling in supplied annotations.
+    """
+    full_size = pybedtools.BedTool(orig_bed).total_coverage()
+    full_bed = pybedtools.BedTool(orig_bed)
+    for name, fname in annotations.items():
+        remain_size = pybedtools.BedTool(orig_bed).subtract(fname).total_coverage()
+        print name, remain_size, full_size, "%.1f" % (float(remain_size) / full_size * 100.0)
+        full_bed = full_bed.subtract(fname)
+    remain_size = full_bed.total_coverage()
+    print "Combined", remain_size, full_size, "%.1f" % (float(remain_size) / full_size * 100.0)
+
+# ## Shared discordant variants
 
 def identify_shared_discordants(incon):
     """Identify discordant variants shared in multiple samples.
@@ -115,7 +140,7 @@ def _isec_summary_to_bed(isec_file, name):
     if not utils.file_exists(out_file):
         with file_transaction({}, out_file) as tx_out_file:
             with open(isec_file) as in_handle:
-                with open(out_file, "w") as out_handle:
+                with open(tx_out_file, "w") as out_handle:
                     for line in in_handle:
                         dline = _prep_discordant_line(line, name)
                         if dline:

@@ -2,16 +2,16 @@
 # File locations on AWS instance
 inputs:
   namere: 'DS-15\d+'
-  regions: /home/ubuntu/color_panel_21.bed
-  vcfs: /encrypted/bams/vcfs/*DS-15*vcf.gz
-  bams: /encrypted/bams/bams/*DS-15*.bam
+  regions: /encrypted/persistent/regions/color_panel_21.bed
+  vcfs: /encrypted/persistent/vcfs/*DS-15*vcf.gz
+  bams: /encrypted/persistent/bams/*DS-15*.bam
 dirs:
-  work: /encrypted/bams/work
+  work: /encrypted/persistent/work
 annotations:
-  segdup: /home/ubuntu/brad/regions/GRCh37.segdup.bed.gz
-  rmsk: /home/ubuntu/brad/regions/GRCh37.rmsk.bed.gz
-  lcr: /home/ubuntu/brad/regions/LCR.bed.gz
-  # grc_patch: /home/ubuntu/brad/regions/GRC_patch_regions.bed.gz
+  segdup: /encrypted/persistent/regions/GRCh37.segdup.bed.gz
+  rmsk: /encrypted/persistent/regions/GRCh37.rmsk.bed.gz
+  lcr: /encrypted/persistent/regions/LCR.bed.gz
+  # grc_patch: /encrypted/persistent/regions/GRC_patch_regions.bed.gz
 # Swapped files and group names
 remap:
   BH9TK7ADXX_DS-159807_AAGGTAC: DS-159815
