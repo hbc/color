@@ -102,10 +102,10 @@ def check_annotated_disc(in_file, annotations):
 def calculate_annotation_overlap(orig_bed, annotations):
     """Calculate amount of original BED file falling in supplied annotations.
     """
-    full_size = pybedtools.BedTool(orig_bed).total_coverage()
-    full_bed = pybedtools.BedTool(orig_bed)
+    full_size = pybedtools.BedTool(gzip.open(orig_bed)).total_coverage()
+    full_bed = pybedtools.BedTool(gzip.open(orig_bed))
     for name, fname in annotations.items():
-        remain_size = pybedtools.BedTool(orig_bed).subtract(fname).total_coverage()
+        remain_size = pybedtools.BedTool(gzip.open(orig_bed)).subtract(fname).total_coverage()
         print name, remain_size, full_size, "%.1f" % (float(remain_size) / full_size * 100.0)
         full_bed = full_bed.subtract(fname)
     remain_size = full_bed.total_coverage()
