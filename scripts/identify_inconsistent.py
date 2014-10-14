@@ -45,9 +45,78 @@ def main(config_file):
             deconvolute_inconsistent(to_check, groups, bed_file)
         disc_bed = identify_shared_discordants(incon)
         ann_bed = annotate_disc_bed(disc_bed, config["annotations"])
-        check_annotated_disc(ann_bed, config["annotations"])
-        calculate_annotation_overlap(bed_file, config["annotations"])
-        print ann_bed
+        remain_disc = check_annotated_disc(ann_bed, config["annotations"])
+        identify_discordant_reasons(remain_disc, incon)
+
+        #calculate_annotation_overlap(bed_file, config["annotations"])
+        #print ann_bed
+
+# ## Identify causes of discordance with filters
+
+def identify_discordant_reasons(discs, incon):
+    """Interrogate discordants to identify potential causes.
+    """
+    all_reasons = collections.defaultdict(int)
+    ctype_stats = collections.defaultdict(list)
+    for (dchrom, dstart, dend, samples) in discs:
+        print "---"
+        if len(samples) >= 5:
+            print dchrom, dstart, dend, samples
+        else:
+            print dchrom, dstart, dend
+            check_regions = []
+            for sample in samples:
+                ctypes = []
+                with open(tz.get_in([sample, "summary"], incon)) as in_handle:
+                    for line in in_handle:
+                        chrom, start, _, _, calls = line.strip().split()
+                        if chrom == dchrom and int(start) >= dstart and int(start) <= dend:
+                            call_counts = collections.defaultdict(int)
+                            for c in list(calls):
+                                call_counts[int(c)] += 1
+                            if len(call_counts) > 1:
+                                if call_counts[0] == 1:
+                                    ctype = "false negative"
+                                elif call_counts[1] == 1:
+                                    ctype = "false positive"
+                                else:
+                                    ctype = "mixed"
+                                stats = _check_problem_call([(chrom, start, calls, sample,
+                                                              incon[sample]["vcf_files"])])
+                                ctype_stats[ctype].extend(stats)
+                                ctypes.append((ctype, calls))
+                                all_reasons[ctype] += 1
+                print " -", sample, ctypes
+    print dict(all_reasons)
+    pprint.pprint(dict(ctype_stats))
+
+def _check_problem_call(call_info):
+    """Identify potential issues with incorrect calls.
+    """
+    out = []
+    for chrom, start, calls, sample, vcf_files in call_info:
+        assert len(calls) == len(vcf_files)
+        for cur_vcf in [x for c, x in zip(list(calls), vcf_files) if c == "1"]:
+            call = _find_call(chrom, start, cur_vcf)
+            parts = call.strip().split("\t")
+            ftinfo = {key: val for (key, val) in zip(parts[-2].split(":"), parts[-1].split(":"))}
+            depth = sum(int(x) for x in ftinfo["AD"].split(","))
+            ref_pl = int(ftinfo["PL"].split(",")[0])
+            qd = float(ref_pl) / float(depth)
+            stats = {"depth": depth, "qd": "%.1f" % qd}
+            if depth > 15:
+                print "   ", parts[:5] + parts[-2:], stats
+            out.append(stats)
+    return out
+
+def _find_call(chrom, start, vcf_file):
+    """Find a specific call at the given position in a bgzipped VCF file.
+    """
+    with gzip.open(vcf_file) as in_handle:
+        for line in (l for l in in_handle if not l.startswith("#")):
+            cur_chrom, cur_start = line.split("\t")[:2]
+            if cur_chrom == chrom and cur_start == start:
+                return line
 
 # ## External annotations
 
@@ -73,9 +142,9 @@ def check_annotated_disc(in_file, annotations):
     """
     ann_count = len(annotations)
     explained = collections.defaultdict(int)
-    remain = 0
     total = 0
     header = []
+    remain = []
     with open(in_file) as in_handle:
         for line in in_handle:
             parts = line.rstrip().split("\t")
@@ -93,11 +162,11 @@ def check_annotated_disc(in_file, annotations):
                         explained[ann_name] += 1
                         gotit = True
                 if not gotit:
-                    remain += 1
-                    size = int(lineid[2]) - int(lineid[1])
-                    print size, lineid
+                    chrom, start, end, samples = lineid
+                    remain.append((chrom, int(start), int(end), samples.split(",")))
                 total += 1
-    print remain, total, dict(explained)
+    print len(remain), total, dict(explained)
+    return remain
 
 def calculate_annotation_overlap(orig_bed, annotations):
     """Calculate amount of original BED file falling in supplied annotations.
