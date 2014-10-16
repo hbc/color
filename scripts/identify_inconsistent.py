@@ -31,7 +31,7 @@ def main(config_file):
                       tz.get_in(["inputs", "namere"], config), groups, config["remap"])
     bed_file = bedutils.clean_file(tz.get_in(["inputs", "regions"], config), config) + ".gz"
     with utils.chdir(tz.get_in(["dirs", "work"], config)):
-        groups = preprocess_vcfs(groups)
+        groups = preprocess_vcfs(groups, bed_file, config["resources"])
         pprint.pprint(groups)
         incon = {}
         for name, fnames in groups.items():
@@ -309,10 +309,9 @@ def investigate_high_counts(summary_file, vcf_files):
             problems.append(vcf_file)
     return problems
 
-
 # ## Pre-processing
 
-def preprocess_vcfs(groups):
+def preprocess_vcfs(groups, bed_file, resources):
     """Pre-process VCFs to ensure they are bgzipped and tabix indexed.
     """
     out_dir = utils.safe_makedir(os.path.join(os.getcwd(), "prep"))
@@ -323,7 +322,10 @@ def preprocess_vcfs(groups):
             if not out_file.endswith(".vcf.gz"):
                 out_file = out_file.replace("vcf.gz", ".vcf.gz")
             _prep_vcf(vcf_file, out_file)
-            prep_vcfs.append(out_file)
+            ann_file = _annotate_vcf(out_file, _find_bam_file(out_file,  fnames.get("bam", [])),
+                                     bed_file, resources)
+            prep_vcfs.append(ann_file)
+        assert None not in prep_vcfs
         groups[name]["vcf"] = prep_vcfs
     return groups
 
@@ -334,6 +336,41 @@ def _prep_vcf(in_file, out_file):
             do.run(cmd.format(**locals()), "Convert VCFs to bgzipped")
     vcfutils.bgzip_and_index(out_file, {})
     return out_file
+
+def _annotate_vcf(vcf_file, bam_file, bed_file, resources):
+    assert bam_file, "BAM file not found for %s" % vcf_file
+    out_file = "%s-annotated%s" % utils.splitext_plus(vcf_file)
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            gatk_jar = resources.get("gatk")
+            ref_file = resources.get("ref_file")
+            bed_file = _clean_bed_file(bed_file.replace(".bed.gz", ".bed"))
+            cmd = ("java -jar {gatk_jar} -T VariantAnnotator -R {ref_file} "
+                   "-L {bed_file} "
+                   "-A GCContent --variant {vcf_file} --out {tx_out_file}")
+            do.run(cmd.format(**locals()), "Annotate VCF")
+    return out_file
+
+def _clean_bed_file(orig_bed):
+    out_bed = "%s-gatkclean%s" % utils.splitext_plus(orig_bed)
+    if not utils.file_exists(out_bed):
+        with file_transaction({}, out_bed) as tx_out_file:
+            with open(orig_bed) as in_handle:
+                with open(tx_out_file, "w") as out_handle:
+                    for line in in_handle:
+                        parts = line.split("\t")
+                        if int(parts[2]) > int(parts[1]):
+                            out_handle.write(line)
+    return out_bed
+
+def _find_bam_file(vcf_file, bam_files):
+    search_file = os.path.basename(vcf_file).replace(".vcf.gz", ".bam")
+    our_bam = [x for x in bam_files if os.path.basename(x) == search_file]
+    if len(our_bam) > 0:
+        assert len(our_bam) == 1
+        return our_bam[0]
+    else:
+        return None
 
 # ## Get files to work on
 
