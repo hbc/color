@@ -44,11 +44,12 @@ def main(config_file):
         for to_check in incon_check:
             deconvolute_inconsistent(to_check, groups, bed_file)
         disc_bed = identify_shared_discordants(incon)
-        ann_bed = annotate_disc_bed(disc_bed, config["annotations"])
+        filtered_bed = merge_filtered(incon)
+        ann_bed = annotate_disc_bed(disc_bed, filtered_bed, config["annotations"])
         remain_disc = check_annotated_disc(ann_bed, config["annotations"])
         identify_discordant_reasons(remain_disc, incon)
 
-        #calculate_annotation_overlap(bed_file, config["annotations"])
+        calculate_annotation_overlap(bed_file, filtered_bed, config["annotations"])
         #print ann_bed
 
 # ## Identify causes of discordance with filters
@@ -60,35 +61,46 @@ def identify_discordant_reasons(discs, incon):
     ctype_stats = collections.defaultdict(list)
     for (dchrom, dstart, dend, samples) in discs:
         print "---"
-        if len(samples) >= 5:
+        #if len(samples) >= 5:
+        if False:
             print dchrom, dstart, dend, samples
+            for sample in samples:
+                for chrom, start, calls in _get_isec_calls(dchrom, dstart, dend, sample, incon):
+                    _check_problem_call([(chrom, start, calls, sample,
+                                          incon[sample]["vcf_files"])])
         else:
             print dchrom, dstart, dend
             check_regions = []
             for sample in samples:
                 ctypes = []
-                with open(tz.get_in([sample, "summary"], incon)) as in_handle:
-                    for line in in_handle:
-                        chrom, start, _, _, calls = line.strip().split()
-                        if chrom == dchrom and int(start) >= dstart and int(start) <= dend:
-                            call_counts = collections.defaultdict(int)
-                            for c in list(calls):
-                                call_counts[int(c)] += 1
-                            if len(call_counts) > 1:
-                                if call_counts[0] == 1:
-                                    ctype = "false negative"
-                                elif call_counts[1] == 1:
-                                    ctype = "false positive"
-                                else:
-                                    ctype = "mixed"
-                                stats = _check_problem_call([(chrom, start, calls, sample,
-                                                              incon[sample]["vcf_files"])])
-                                ctype_stats[ctype].extend(stats)
-                                ctypes.append((ctype, calls))
-                                all_reasons[ctype] += 1
+                for chrom, start, calls in _get_isec_calls(dchrom, dstart, dend, sample, incon):
+                    call_counts = collections.defaultdict(int)
+                    for c in list(calls):
+                        call_counts[int(c)] += 1
+                    if len(call_counts) > 1:
+                        if call_counts[0] == 1:
+                            ctype = "false negative"
+                        elif call_counts[1] == 1:
+                            ctype = "false positive"
+                        else:
+                            ctype = "mixed"
+                        stats = _check_problem_call([(chrom, start, calls, sample,
+                                                      incon[sample]["vcf_files"])])
+                        ctype_stats[ctype].extend(stats)
+                        ctypes.append((ctype, calls))
+                        all_reasons[ctype] += 1
                 print " -", sample, ctypes
     print dict(all_reasons)
-    pprint.pprint(dict(ctype_stats))
+    #pprint.pprint(dict(ctype_stats))
+
+def _get_isec_calls(dchrom, dstart, dend, sample, incon):
+    """Retrieve intersection calls for all samples in a specific region.
+    """
+    with open(tz.get_in([sample, "summary"], incon)) as in_handle:
+        for line in in_handle:
+            chrom, start, _, _, calls = line.strip().split()
+            if chrom == dchrom and int(start) >= dstart and int(start) <= dend:
+                yield chrom, start, calls
 
 def _check_problem_call(call_info):
     """Identify potential issues with incorrect calls.
@@ -104,8 +116,13 @@ def _check_problem_call(call_info):
             ref_pl = int(ftinfo["PL"].split(",")[0])
             qd = float(ref_pl) / float(depth)
             stats = {"depth": depth, "qd": "%.1f" % qd}
+            info_want = ("GC=",)
+            for info_item in parts[-3].split(";"):
+                if info_item.startswith(info_want):
+                    key, val = info_item.split("=")
+                    stats[key] = val
             if depth > 15:
-                print "   ", parts[:5] + parts[-2:], stats
+                print "  ", parts[:2] + parts[3:5] + parts[-2:], stats
             out.append(stats)
     return out
 
@@ -120,13 +137,15 @@ def _find_call(chrom, start, vcf_file):
 
 # ## External annotations
 
-def annotate_disc_bed(in_file, annotations):
+def annotate_disc_bed(in_file, filtered_bed, annotations):
     """Annotate a BED file with potential causes from genomic regions.
     """
     out_file = "%s-annotate.bed" % utils.splitext_plus(in_file)[0]
     if not utils.file_exists(out_file):
         with file_transaction({}, out_file) as tx_out_file:
             names, files = [], []
+            names.append("filtered")
+            files.append(filtered_bed)
             for name, fname in annotations.items():
                 names.append(name)
                 files.append(fname)
@@ -140,7 +159,7 @@ def annotate_disc_bed(in_file, annotations):
 def check_annotated_disc(in_file, annotations):
     """Provide statistics on discordant variants removed by annotations.
     """
-    ann_count = len(annotations)
+    ann_count = len(annotations) + 1  # all of the annotations plus filtered regions
     explained = collections.defaultdict(int)
     total = 0
     header = []
@@ -168,12 +187,12 @@ def check_annotated_disc(in_file, annotations):
     print len(remain), total, dict(explained)
     return remain
 
-def calculate_annotation_overlap(orig_bed, annotations):
+def calculate_annotation_overlap(orig_bed, filtered_bed, annotations):
     """Calculate amount of original BED file falling in supplied annotations.
     """
     full_size = pybedtools.BedTool(gzip.open(orig_bed)).total_coverage()
     full_bed = pybedtools.BedTool(gzip.open(orig_bed))
-    for name, fname in annotations.items():
+    for name, fname in [("filtered", filtered_bed)] + annotations.items():
         remain_size = pybedtools.BedTool(gzip.open(orig_bed)).subtract(fname).total_coverage()
         print name, remain_size, full_size, "%.1f" % (float(remain_size) / full_size * 100.0)
         full_bed = full_bed.subtract(fname)
@@ -188,11 +207,24 @@ def identify_shared_discordants(incon):
     Looks for pervasive issues likely due to algorithmic/genome representation issues.
     Create a BED file of discordant calls and then merge these to identify regions.
     """
-    dis_beds = [_isec_summary_to_bed(info["summary"], name)
+    dis_beds = [_isec_summary_to_bed(info["summary"], name, ext="-discordant")
                 for name, info in incon.items()]
     work_dir = utils.safe_makedir(os.path.join(os.getcwd(), "cmpsum"))
     merge_disc_bed = _merge_discordant_beds(dis_beds, work_dir)
     return merge_disc_bed
+
+def merge_filtered(incon):
+    """Merge all positions filtered in the inputs to have a consistent callset.
+    """
+    work_dir = utils.safe_makedir(os.path.join(os.getcwd(), "cmpsum"))
+    out_file = os.path.join(work_dir, "filtered-merged.bed")
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            bed_files_str = " ".join(info["excluded"] for info in incon.values())
+            cmd = ("cat {bed_files_str} | sort -k1,1 -k2,2n | "
+                   "bedtools merge -d 1 -c 4 -o distinct -i - > {tx_out_file}")
+            do.run(cmd.format(**locals()), "Merge filtered regions")
+    return out_file
 
 def _merge_discordant_beds(bed_files, work_dir):
     out_file = os.path.join(work_dir, "discordant-merged.bed")
@@ -204,23 +236,23 @@ def _merge_discordant_beds(bed_files, work_dir):
             do.run(cmd.format(**locals()), "Merge discordant regions")
     return out_file
 
-def _isec_summary_to_bed(isec_file, name):
-    out_file = "%s-discordant.bed" % utils.splitext_plus(isec_file)[0]
+def _isec_summary_to_bed(isec_file, name, ext="", require_different=True):
+    out_file = "%s%s.bed" % (utils.splitext_plus(isec_file)[0], ext)
     if not utils.file_exists(out_file):
         with file_transaction({}, out_file) as tx_out_file:
             with open(isec_file) as in_handle:
                 with open(tx_out_file, "w") as out_handle:
                     for line in in_handle:
-                        dline = _prep_discordant_line(line, name)
+                        dline = _prep_discordant_line(line, name, require_different)
                         if dline:
                             out_handle.write("\t".join(str(x) for x in dline) + "\n")
     return out_file
 
-def _prep_discordant_line(line, name):
+def _prep_discordant_line(line, name, require_different=True):
     """Prepare information on a line from intersection if discordant.
     """
     chrom, start, ref, alt, cmpstr = line.strip().split()
-    if len(set(list(cmpstr))) > 1:
+    if not require_different or len(set(list(cmpstr))) > 1:
         start = int(start) - 1
         size = max(len(x) for x in [ref] + alt.split(","))
         return [chrom, start, start + size, name]
@@ -236,17 +268,19 @@ def find_inconsistent(name, vcf_files, bed_file):
     target_count = len(vcf_files) - 1
     if not os.path.exists(isec_dir):
         with file_transaction({}, isec_dir) as tx_isec_dir:
-            cmd = ("bcftools isec {vcf_files_str} -R {bed_file} "
+            cmd = ("bcftools isec -f 'PASS,.' {vcf_files_str} -R {bed_file} "
                    "-n -{target_count} -p {tx_isec_dir} -O z")
             do.run(cmd.format(**locals()), "Intersection finding non-consistent calls")
     isec_summary = _calculate_summary(vcf_files, bed_file, cmp_dir)
+    excluded = _calculate_excluded(vcf_files, bed_file, cmp_dir, name)
     inconsistent = []
     for i in range(len(vcf_files)):
         with gzip.open(os.path.join(isec_dir, "%04d.vcf.gz" % i)) as in_handle:
             inconsistent.append(sum(1 for l in in_handle if not l.startswith("#")))
     return {"counts": inconsistent,
             "vcf_files": vcf_files,
-            "summary": isec_summary}
+            "summary": isec_summary,
+            "excluded": excluded}
 
 def _calculate_summary(vcf_files, bed_file, cmp_dir):
     """Summarize all variants called in the VCF files as a bcftools isec output file.
@@ -260,9 +294,20 @@ def _calculate_summary(vcf_files, bed_file, cmp_dir):
     if not utils.file_exists(out_file):
         with file_transaction({}, out_file) as tx_out_file:
             vcf_files_str = " ".join(vcf_files)
-            cmd = ("bcftools isec -n '+1' -o {tx_out_file} -R {bed_file} {vcf_files_str}")
+            cmd = ("bcftools isec -f 'PASS,.' -n '+1' -o {tx_out_file} -R {bed_file} {vcf_files_str}")
             do.run(cmd.format(**locals()), "Variant comparison summary")
     return out_file
+
+def _calculate_excluded(vcf_files, bed_file, cmp_dir, name):
+    """Calculate a BED file of regions filtered in any input sample.
+    """
+    out_file = os.path.join(cmp_dir, "filtered_positions.txt")
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            vcf_files_str = " ".join(vcf_files)
+            cmd = ("bcftools isec -f 'ColorCustom' -n '+1' -o {tx_out_file} -R {bed_file} {vcf_files_str}")
+            do.run(cmd.format(**locals()), "Filtered summary")
+    return _isec_summary_to_bed(out_file, name, require_different=False)
 
 # ## Investigate comparison problems
 
@@ -315,6 +360,7 @@ def preprocess_vcfs(groups, bed_file, resources):
     """Pre-process VCFs to ensure they are bgzipped and tabix indexed.
     """
     out_dir = utils.safe_makedir(os.path.join(os.getcwd(), "prep"))
+    filter_stats = []
     for name, fnames in groups.items():
         prep_vcfs = []
         for vcf_file in fnames["vcf"]:
@@ -324,10 +370,23 @@ def preprocess_vcfs(groups, bed_file, resources):
             _prep_vcf(vcf_file, out_file)
             ann_file = _annotate_vcf(out_file, _find_bam_file(out_file,  fnames.get("bam", [])),
                                      bed_file, resources)
-            prep_vcfs.append(ann_file)
+            filter_file, cur_stats = _filter_vcf(ann_file)
+            filter_stats.append(cur_stats)
+            prep_vcfs.append(filter_file)
         assert None not in prep_vcfs
         groups[name]["vcf"] = prep_vcfs
+    _analyze_filtered_stats(filter_stats)
     return groups
+
+def _analyze_filtered_stats(stats):
+    pcts = [x["pct"] for x in stats]
+    origs = [x["orig"] for x in stats]
+    finals = [x["final"] for x in stats]
+    removed = [x["orig"] - x["final"] for x in stats]
+    print "Removed percent. range: %.1f%%-%.1f%%; median: %.1f%%" % (min(pcts), max(pcts), np.median(pcts))
+    print "Removed counts. range: %s-%s; median: %s" % (min(removed), max(removed), np.median(removed))
+    print "Original counts. range: %s-%s; median: %s" % (min(origs), max(origs), np.median(origs))
+    print "Final counts. range: %s-%s; median: %s" % (min(finals), max(finals), np.median(finals))
 
 def _prep_vcf(in_file, out_file):
     if not utils.file_exists(out_file):
@@ -337,7 +396,29 @@ def _prep_vcf(in_file, out_file):
     vcfutils.bgzip_and_index(out_file, {})
     return out_file
 
+def _filter_vcf(orig_file):
+    """Filter VCF with bcftools, providing count summary of items removed.
+    """
+    expr = ('SUM(AD[*]) < 15 || '
+            'PL[0] / SUM(AD[*]) <= 3.0 || '
+            'GC < 27.0 || GC > 73.0')
+    out_file = "%s-filter%s" % utils.splitext_plus(orig_file)
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            cmd = ("bcftools filter -O z -o {tx_out_file} "
+                   "-e '{expr}' -s 'ColorCustom' {orig_file}")
+            do.run(cmd.format(**locals()), "Hard filter VCF")
+    vcfutils.bgzip_and_index(out_file, {})
+    def count(f):
+        with gzip.open(f) as h:
+            return sum(1 for line in h if not line.startswith("#") and line.split("\t")[6] in  ["PASS", "."])
+    removed_stats = {"orig": count(orig_file), "final": count(out_file)}
+    removed_stats["pct"] = float(removed_stats["final"]) * 100.0 / removed_stats["orig"]
+    return out_file, removed_stats
+
 def _annotate_vcf(vcf_file, bam_file, bed_file, resources):
+    """Provide GATK annotations missing from the original VCF.
+    """
     assert bam_file, "BAM file not found for %s" % vcf_file
     out_file = "%s-annotated%s" % utils.splitext_plus(vcf_file)
     if not utils.file_exists(out_file):

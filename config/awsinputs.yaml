@@ -11,7 +11,7 @@ resources:
 dirs:
   work: /encrypted/permanent/work
 annotations:
-  segdup: /encrypted/permanent/regions/GRCh37.segdup.bed.gz
+  #segdup: /encrypted/permanent/regions/GRCh37.segdup.bed.gz
   rmsk: /encrypted/permanent/regions/GRCh37.rmsk.bed.gz
   lcr: /encrypted/permanent/regions/LCR.bed.gz
   # grc_patch: /encrypted/permanent/regions/GRC_patch_regions.bed.gz
