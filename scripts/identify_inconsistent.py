@@ -401,7 +401,7 @@ def _filter_vcf(orig_file):
     """
     expr = ('SUM(AD[*]) < 15 || '
             'PL[0] / SUM(AD[*]) <= 3.0 || '
-            'GC < 27.0 || GC > 73.0')
+            'GC < 25.0 || GC > 77.0')
     out_file = "%s-filter%s" % utils.splitext_plus(orig_file)
     if not utils.file_exists(out_file):
         with file_transaction({}, out_file) as tx_out_file:
