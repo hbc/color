@@ -50,11 +50,16 @@ def main(config_file):
                                                                         countm, totalm, countm * 100.0 / totalm)
         for to_check in incon_check:
             deconvolute_inconsistent(to_check, groups, bed_file)
-        disc_bed = identify_shared_discordants(incon)
+        disc_bed, incon = identify_shared_discordants(incon)
         filtered_bed = merge_filtered(incon)
-        ann_bed = annotate_disc_bed(disc_bed, filtered_bed, config["annotations"])
-        remain_disc = check_annotated_disc(ann_bed, config["annotations"])
-        identify_discordant_reasons(remain_disc, incon)
+        # only use filtered since annotations supplied upstream now
+        #ann_bed = annotate_disc_bed(disc_bed, filtered_bed, config["annotations"])
+        #remain_disc = check_annotated_disc(ann_bed, incon, config["annotations"])
+        ann_bed = annotate_disc_bed(disc_bed, filtered_bed, {})
+        remain_disc = check_annotated_disc(ann_bed, incon, {})
+        summarize_remaining_disc(incon)
+        if len(remain_disc) < 10:
+            identify_discordant_reasons(remain_disc, incon)
 
         calculate_annotation_overlap(bed_file, filtered_bed, config["annotations"])
         #print ann_bed
@@ -123,12 +128,12 @@ def _check_problem_call(call_info):
             ref_pl = int(ftinfo["PL"].split(",")[0])
             qd = float(ref_pl) / float(depth)
             stats = {"depth": depth, "qd": "%.1f" % qd}
-            info_want = ("GC=",)
+            info_want = ("GC=", "RPT=")
             for info_item in parts[-3].split(";"):
                 if info_item.startswith(info_want):
                     key, val = info_item.split("=")
                     stats[key] = val
-            if depth > 15:
+            if depth > 5:
                 print "  ", parts[:2] + parts[3:5] + parts[-2:], stats
             out.append(stats)
     return out
@@ -163,7 +168,24 @@ def annotate_disc_bed(in_file, filtered_bed, annotations):
             do.run(cmd.format(**locals()), "Annotate discordant regions")
     return out_file
 
-def check_annotated_disc(in_file, annotations):
+def summarize_remaining_disc(incon):
+    """Summarize counts of average discordants per sample replicates.
+    """
+    remain = []
+    remain_pct = []
+    totals = []
+    for info in incon.values():
+        disc_bed = info["discordant"]
+        excl_bed = info["excluded"]
+        cmd = "bedtools subtract -A -a {disc_bed} -b {excl_bed} | wc -l"
+        cur_remain = int(subprocess.check_output(cmd.format(**locals()), shell=True).strip())
+        remain.append(cur_remain)
+        remain_pct.append(cur_remain * 100.0 / np.mean(info["totals"]))
+        totals.append(np.mean(info["totals"]))
+    print "Remaining discordants per sample replicate"
+    print " Median pct/sample: %s / %s (%.2f%%)" % (np.median(remain), np.median(totals), np.median(remain_pct))
+
+def check_annotated_disc(in_file, incon, annotations):
     """Provide statistics on discordant variants removed by annotations.
     """
     ann_count = len(annotations) + 1  # all of the annotations plus filtered regions
@@ -192,9 +214,9 @@ def check_annotated_disc(in_file, annotations):
                     remain.append((chrom, int(start), int(end), samples.split(",")))
                 total += 1
     nofilter = total - explained["filtered"]
-    print "Annotated discordants"
-    print " Remaining: %s" % len(remain)
+    print "Grouped discordants"
     print " Not filtered: %s / %s (%.1f%%)" % (nofilter, total, nofilter * 100.0 / total)
+    print " Remaining: %s" % len(remain)
     print " Breakdown: %s" % dict(explained)
     return remain
 
@@ -218,17 +240,28 @@ def identify_shared_discordants(incon):
     Looks for pervasive issues likely due to algorithmic/genome representation issues.
     Create a BED file of discordant calls and then merge these to identify regions.
     """
-    dis_beds = [_isec_summary_to_bed(info["summary"], name, ext="-discordant")
-                for name, info in incon.items()]
+    dis_beds = []
+    for name, info in incon.items():
+        cur_dis = _isec_summary_to_bed(info["summary"], name, ext="-discordant")
+        dis_beds.append(cur_dis)
+        cur_dis_merge = "%s-merged%s" % utils.splitext_plus(cur_dis)
+        if not utils.file_exists(cur_dis_merge):
+            with file_transaction({}, cur_dis_merge) as tx_out_file:
+                cmd = ("sort -k1,1 -k2,2n {cur_dis} | "
+                       "bedtools merge -d 1 -c 4 -o distinct -i - > {tx_out_file}")
+                do.run(cmd.format(**locals()), "Merge discordant regions")
+        incon[name]["discordant"] = cur_dis_merge
     work_dir = utils.safe_makedir(os.path.join(os.getcwd(), "cmpsum"))
     merge_disc_bed = _merge_discordant_beds(dis_beds, work_dir)
-    return merge_disc_bed
+    return merge_disc_bed, incon
 
 def merge_filtered(incon):
     """Merge all positions filtered in the inputs to have a consistent callset.
     """
     work_dir = utils.safe_makedir(os.path.join(os.getcwd(), "cmpsum"))
     out_file = os.path.join(work_dir, "filtered-merged.bed")
+    with open(out_file, "w") as out_handle:
+        out_handle.write("1\t1\t2\tnofilters\n")
     if not utils.file_exists(out_file):
         with file_transaction({}, out_file) as tx_out_file:
             bed_files_str = " ".join(info["excluded"] for info in incon.values())
@@ -416,14 +449,18 @@ def _filter_vcf(orig_file):
     """Filter VCF with bcftools, providing count summary of items removed.
     """
     expr_max = ('SUM(AD[*]) < 15 || '
-            'PL[0] / SUM(AD[*]) <= 3.0 || '
-            'GC < 25.0 || GC > 77.0 || '
-            'RPT[*] = "rmsk" || '
-            'RPT[*] = "lcr"')
-    expr_min = ('SUM(AD[*]) < 13 || '
-                'PL[0] / SUM(AD[*]) <= 1.5 || '
+                'PL[0] / SUM(AD[*]) <= 3.0 || '
                 'GC < 20.0 || GC > 77.0 || '
-                '(RPT[*] = "lcr" && RPT[*] = "rmsk")')
+                'RPT[*] = "rmsk" || '
+                'RPT[*] = "lcr"')
+    expr_min2 = ('SUM(AD[*]) < 15 || '
+                 'PL[0] / SUM(AD[*]) <= 3.0 || '
+                 'RPT[*] = "lcr"')
+    expr_min1 = ('SUM(AD[*]) < 15 || '
+                 'PL[0] / SUM(AD[*]) <= 3.0 || '
+                 '(RPT[*] = "lcr" && RPT[*] = "rmsk")')
+    expr_min0 = ('SUM(AD[*]) < 15 || '
+                 'PL[0] / SUM(AD[*]) <= 3.0')
     expr_all = 'GC < 1.0'
     expr = expr_max
     out_file = "%s-filter%s" % utils.splitext_plus(orig_file)
@@ -460,11 +497,18 @@ def _prep_annotations(annotations, ref_file):
     """Convert annotation file to have standard name, and merge into single file.
     """
     all_anns = []
+    slops = {"rmsk": 0, "lcr": 20}
     for name, orig_bed in annotations.items():
         cur_out_file = "%s-bcftoolsprep.bed" % (utils.splitext_plus(orig_bed)[0])
         if not utils.file_exists(cur_out_file):
             with file_transaction({}, cur_out_file) as tx_out_file:
-                cmd = ("gunzip -c {orig_bed} | "
+                cur_slop = slops[name]
+                if cur_slop:
+                    slop_cmd = "bedtools slop -b {cur_slop} -g {ref_file}.fai -i - | "
+                else:
+                    slop_cmd = ""
+                cmd = ("gunzip -c {orig_bed} | " +
+                       slop_cmd +
                        """awk '{{ $4 = "{name}" }}; {{print}}' FS='\\t' OFS='\\t' """
                        "> {tx_out_file}")
                 do.run(cmd.format(**locals()), "Prepare annotation file for bcftools")
@@ -474,7 +518,6 @@ def _prep_annotations(annotations, ref_file):
         with file_transaction({}, out_file) as tx_out_file:
             bed_files_str = " ".join(all_anns)
             cmd = ("cat {bed_files_str} | sort -k1,1 -k2,2n | "
-                   "bedtools slop -b 20 -g {ref_file}.fai -i - | "
                    "bedtools merge -d 1 -c 4 -o distinct -i - | bgzip -c > {tx_out_file}")
             do.run(cmd.format(**locals()), "Merge all input annotations")
     if not utils.file_exists(out_file + ".tbi"):
