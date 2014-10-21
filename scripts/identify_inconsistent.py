@@ -31,16 +31,23 @@ def main(config_file):
                       tz.get_in(["inputs", "namere"], config), groups, config["remap"])
     bed_file = bedutils.clean_file(tz.get_in(["inputs", "regions"], config), config) + ".gz"
     with utils.chdir(tz.get_in(["dirs", "work"], config)):
-        groups = preprocess_vcfs(groups, bed_file, config["resources"])
-        pprint.pprint(groups)
+        groups = preprocess_vcfs(groups, bed_file, config["resources"], config["annotations"])
+        #pprint.pprint(groups)
         incon = {}
         for name, fnames in groups.items():
             incon[name] = find_inconsistent(name, fnames["vcf"], bed_file)
-        incon_check = []
+        incon_check, totals, counts = [], [], []
         for name, info in sorted(incon.items(), key=lambda x: np.mean(x[1]["counts"]), reverse=True):
+            totals.extend(info["totals"])
+            counts.extend(info["counts"])
             print name, info["counts"]
             if np.mean(info["counts"]) > 100:
                 incon_check.extend(investigate_high_counts(info["summary"], info["vcf_files"]))
+        totalm = np.median(totals)
+        countm = np.median(counts)
+        print "Overall discordants: %s-%s; %s-%s; %s / %s => %.1f%%" % (min(counts), max(counts),
+                                                                        min(totals), max(totals),
+                                                                        countm, totalm, countm * 100.0 / totalm)
         for to_check in incon_check:
             deconvolute_inconsistent(to_check, groups, bed_file)
         disc_bed = identify_shared_discordants(incon)
@@ -184,7 +191,11 @@ def check_annotated_disc(in_file, annotations):
                     chrom, start, end, samples = lineid
                     remain.append((chrom, int(start), int(end), samples.split(",")))
                 total += 1
-    print len(remain), total, dict(explained)
+    nofilter = total - explained["filtered"]
+    print "Annotated discordants"
+    print " Remaining: %s" % len(remain)
+    print " Not filtered: %s / %s (%.1f%%)" % (nofilter, total, nofilter * 100.0 / total)
+    print " Breakdown: %s" % dict(explained)
     return remain
 
 def calculate_annotation_overlap(orig_bed, filtered_bed, annotations):
@@ -274,10 +285,14 @@ def find_inconsistent(name, vcf_files, bed_file):
     isec_summary = _calculate_summary(vcf_files, bed_file, cmp_dir)
     excluded = _calculate_excluded(vcf_files, bed_file, cmp_dir, name)
     inconsistent = []
-    for i in range(len(vcf_files)):
+    totals = []
+    for i, vcf_file in enumerate(vcf_files):
         with gzip.open(os.path.join(isec_dir, "%04d.vcf.gz" % i)) as in_handle:
             inconsistent.append(sum(1 for l in in_handle if not l.startswith("#")))
+        with gzip.open(vcf_file) as in_handle:
+            totals.append(sum(1 for l in in_handle if not l.startswith("#")))
     return {"counts": inconsistent,
+            "totals": totals,
             "vcf_files": vcf_files,
             "summary": isec_summary,
             "excluded": excluded}
@@ -356,7 +371,7 @@ def investigate_high_counts(summary_file, vcf_files):
 
 # ## Pre-processing
 
-def preprocess_vcfs(groups, bed_file, resources):
+def preprocess_vcfs(groups, bed_file, resources, annotations):
     """Pre-process VCFs to ensure they are bgzipped and tabix indexed.
     """
     out_dir = utils.safe_makedir(os.path.join(os.getcwd(), "prep"))
@@ -370,7 +385,8 @@ def preprocess_vcfs(groups, bed_file, resources):
             _prep_vcf(vcf_file, out_file)
             ann_file = _annotate_vcf(out_file, _find_bam_file(out_file,  fnames.get("bam", [])),
                                      bed_file, resources)
-            filter_file, cur_stats = _filter_vcf(ann_file)
+            ann2_file = _annotate_repeats(ann_file, annotations, resources.get("ref_file"))
+            filter_file, cur_stats = _filter_vcf(ann2_file)
             filter_stats.append(cur_stats)
             prep_vcfs.append(filter_file)
         assert None not in prep_vcfs
@@ -399,9 +415,17 @@ def _prep_vcf(in_file, out_file):
 def _filter_vcf(orig_file):
     """Filter VCF with bcftools, providing count summary of items removed.
     """
-    expr = ('SUM(AD[*]) < 15 || '
+    expr_max = ('SUM(AD[*]) < 15 || '
             'PL[0] / SUM(AD[*]) <= 3.0 || '
-            'GC < 25.0 || GC > 77.0')
+            'GC < 25.0 || GC > 77.0 || '
+            'RPT[*] = "rmsk" || '
+            'RPT[*] = "lcr"')
+    expr_min = ('SUM(AD[*]) < 13 || '
+                'PL[0] / SUM(AD[*]) <= 1.5 || '
+                'GC < 20.0 || GC > 77.0 || '
+                '(RPT[*] = "lcr" && RPT[*] = "rmsk")')
+    expr_all = 'GC < 1.0'
+    expr = expr_max
     out_file = "%s-filter%s" % utils.splitext_plus(orig_file)
     if not utils.file_exists(out_file):
         with file_transaction({}, out_file) as tx_out_file:
@@ -415,6 +439,48 @@ def _filter_vcf(orig_file):
     removed_stats = {"orig": count(orig_file), "final": count(out_file)}
     removed_stats["pct"] = float(removed_stats["final"]) * 100.0 / removed_stats["orig"]
     return out_file, removed_stats
+
+def _annotate_repeats(vcf_file, annotations, ref_file):
+    """Associate variants with repeat tracks.
+    """
+    header = '##INFO=<ID=RPT,Number=.,Type=String,Description="Repeat track overlaps">'
+    out_file = "%s-repeats%s" % utils.splitext_plus(vcf_file)
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            header_file = "%s-repeatheader.txt" % utils.splitext_plus(tx_out_file)[0]
+            with open(header_file, "w") as out_handle:
+                out_handle.write(header)
+            prep_bed = _prep_annotations(annotations, ref_file)
+            cmd = ("bcftools annotate -a {prep_bed} -c CHROM,FROM,TO,RPT "
+                   "-h {header_file} {vcf_file} -O z -o {tx_out_file}")
+            do.run(cmd.format(**locals()), "Annotate input variants with repeats")
+    return out_file
+
+def _prep_annotations(annotations, ref_file):
+    """Convert annotation file to have standard name, and merge into single file.
+    """
+    all_anns = []
+    for name, orig_bed in annotations.items():
+        cur_out_file = "%s-bcftoolsprep.bed" % (utils.splitext_plus(orig_bed)[0])
+        if not utils.file_exists(cur_out_file):
+            with file_transaction({}, cur_out_file) as tx_out_file:
+                cmd = ("gunzip -c {orig_bed} | "
+                       """awk '{{ $4 = "{name}" }}; {{print}}' FS='\\t' OFS='\\t' """
+                       "> {tx_out_file}")
+                do.run(cmd.format(**locals()), "Prepare annotation file for bcftools")
+        all_anns.append(cur_out_file)
+    out_file = "%s-merged.bed.gz" % (utils.splitext_plus(all_anns[0])[0])
+    if not utils.file_exists(out_file):
+        with file_transaction({}, out_file) as tx_out_file:
+            bed_files_str = " ".join(all_anns)
+            cmd = ("cat {bed_files_str} | sort -k1,1 -k2,2n | "
+                   "bedtools slop -b 20 -g {ref_file}.fai -i - | "
+                   "bedtools merge -d 1 -c 4 -o distinct -i - | bgzip -c > {tx_out_file}")
+            do.run(cmd.format(**locals()), "Merge all input annotations")
+    if not utils.file_exists(out_file + ".tbi"):
+        cmd = "tabix -p bed {out_file}"
+        do.run(cmd.format(**locals()), "tabix index prepped annotation file")
+    return out_file
 
 def _annotate_vcf(vcf_file, bam_file, bed_file, resources):
     """Provide GATK annotations missing from the original VCF.
