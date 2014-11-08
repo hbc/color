@@ -14,6 +14,7 @@ import pybedtools
 import toolz as tz
 import numpy as np
 from scipy.cluster import vq
+import vcf
 import yaml
 
 from bcbio import utils
@@ -303,10 +304,10 @@ def _prep_discordant_line(line, name, require_different=True):
 
 # ## Comparisons
 
-def find_inconsistent(name, vcf_files, bed_file):
+def find_inconsistent(name, vcf_files, bed_file, dirname="compare"):
     """Find inconsistent calls in provided regions of interest for each group.
     """
-    cmp_dir = utils.safe_makedir(os.path.join(os.getcwd(), "compare", name))
+    cmp_dir = utils.safe_makedir(os.path.join(os.getcwd(), dirname, name))
     isec_dir = os.path.join(cmp_dir, "isec")
     vcf_files_str = " ".join(vcf_files)
     target_count = len(vcf_files) - 1
@@ -411,17 +412,22 @@ def preprocess_vcfs(groups, bed_file, resources, annotations):
     filter_stats = []
     for name, fnames in groups.items():
         prep_vcfs = []
+        orig_vcfs = []
         for vcf_file in fnames["vcf"]:
-            out_file = os.path.join(out_dir, os.path.basename(vcf_file))
-            if not out_file.endswith(".vcf.gz"):
-                out_file = out_file.replace("vcf.gz", ".vcf.gz")
-            _prep_vcf(vcf_file, out_file)
-            ann_file = _annotate_vcf(out_file, _find_bam_file(out_file,  fnames.get("bam", [])),
+            prep_file = os.path.join(out_dir, os.path.basename(vcf_file))
+            if not prep_file.endswith(".vcf.gz"):
+                prep_file = prep_file.replace("vcf.gz", ".vcf.gz")
+            prep_file = _prep_vcf(vcf_file, prep_file)
+            orig_vcfs.append(prep_file)
+            ann_file = _annotate_vcf(prep_file, _find_bam_file(prep_file,  fnames.get("bam", [])),
                                      bed_file, resources)
             ann2_file = _annotate_repeats(ann_file, annotations, resources.get("ref_file"))
             filter_file, cur_stats = _filter_vcf(ann2_file)
             filter_stats.append(cur_stats)
             prep_vcfs.append(filter_file)
+        orig_incon = find_inconsistent(name, orig_vcfs, bed_file, "compareorig")
+        print _filtered_incon_stats(orig_incon["summary"], prep_vcfs)
+        raise NotImplementedError
         assert None not in prep_vcfs
         groups[name]["vcf"] = prep_vcfs
     _analyze_filtered_stats(filter_stats)
@@ -561,6 +567,36 @@ def _find_bam_file(vcf_file, bam_files):
         return our_bam[0]
     else:
         return None
+
+# ## Calculate statistics on filtered variants versus discordants
+
+def _filtered_incon_stats(summary_txt, vcf_files):
+    """Identify number of filtered variants versus identified discordants.
+    """
+    incon_rs = set()
+    with open(summary_txt) as in_handle:
+        for line in in_handle:
+            chrom, start, ref, alt, cmpstr = line.strip().split()
+            if len(set(list(cmpstr))) > 1:
+                for pos in range(int(start), int(start) + len(ref)):
+                    incon_rs.add((chrom, pos))
+    for vcf_file in vcf_files:
+        counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+        with gzip.open(vcf_file) as in_handle:
+            for parts in (l.split() for l in in_handle if not l.startswith("#")):
+                filtered = parts[6] != "PASS"
+                position = (parts[0], int(parts[1]))
+                if filtered:
+                    if position in incon_rs:
+                        counts["tp"] += 1
+                    else:
+                        counts["fn"] += 1
+                else:
+                    if position in incon_rs:
+                        counts["fp"] += 1
+                    else:
+                        counts["tn"] += 1
+        print vcf_file, counts
 
 # ## Get files to work on
 
