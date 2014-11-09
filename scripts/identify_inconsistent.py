@@ -2,6 +2,7 @@
 """Identify inconsistent calls between VCF replicates as starting point for analysis.
 """
 import collections
+import csv
 import glob
 import gzip
 import pprint
@@ -410,6 +411,9 @@ def preprocess_vcfs(groups, bed_file, resources, annotations):
     """
     out_dir = utils.safe_makedir(os.path.join(os.getcwd(), "prep"))
     filter_stats = []
+    persample_stats = []
+    header = [["tp"], ["fp"], ["tn", "remove_depth"], ["tn", "remove_region"], ["tn", "review"],
+              ["fn", "remove_depth"], ["fn", "remove_region"], ["fn", "review"]]
     for name, fnames in groups.items():
         prep_vcfs = []
         orig_vcfs = []
@@ -422,16 +426,26 @@ def preprocess_vcfs(groups, bed_file, resources, annotations):
             ann_file = _annotate_vcf(prep_file, _find_bam_file(prep_file,  fnames.get("bam", [])),
                                      bed_file, resources)
             ann2_file = _annotate_repeats(ann_file, annotations, resources.get("ref_file"))
-            filter_file, cur_stats = _filter_vcf(ann2_file)
+            filter1_file, cur_stats = _filter_vcf(ann2_file, "min0", "ColorRemoveDepth")
+            filter2_file, _ = _filter_vcf(filter1_file, "min1", "ColorRemoveRegion")
+            filter_file, _ = _filter_vcf(filter2_file, "max", "ColorReview")
             filter_stats.append(cur_stats)
             prep_vcfs.append(filter_file)
         orig_incon = find_inconsistent(name, orig_vcfs, bed_file, "compareorig")
-        print _filtered_incon_stats(orig_incon["summary"], prep_vcfs)
-        raise NotImplementedError
+        persample_stats.extend(_filtered_incon_stats(orig_incon["summary"], prep_vcfs, name, header))
         assert None not in prep_vcfs
         groups[name]["vcf"] = prep_vcfs
     _analyze_filtered_stats(filter_stats)
+    _write_filtered_counts(persample_stats, header)
     return groups
+
+def _write_filtered_counts(stats, header):
+    out_file = os.path.join(os.getcwd(), "filter_counts.csv")
+    with open(out_file, "w") as out_handle:
+        writer = csv.writer(out_handle)
+        writer.writerow(["sample"] + ["-".join(xs) for xs in header])
+        for stat in sorted(stats):
+            writer.writerow(stat)
 
 def _analyze_filtered_stats(stats):
     pcts = [x["pct"] for x in stats]
@@ -451,29 +465,31 @@ def _prep_vcf(in_file, out_file):
     vcfutils.bgzip_and_index(out_file, {})
     return out_file
 
-def _filter_vcf(orig_file):
+def _filter_vcf(orig_file, ftype="max", name="ColorCustom"):
     """Filter VCF with bcftools, providing count summary of items removed.
     """
-    expr_max = ('SUM(AD[*]) < 15 || '
-                'PL[0] / SUM(AD[*]) <= 3.0 || '
-                'GC < 20.0 || GC > 77.0 || '
-                'RPT[*] = "rmsk" || '
-                'RPT[*] = "lcr"')
-    expr_min2 = ('SUM(AD[*]) < 15 || '
-                 'PL[0] / SUM(AD[*]) <= 3.0 || '
-                 'RPT[*] = "lcr"')
-    expr_min1 = ('SUM(AD[*]) < 15 || '
-                 'PL[0] / SUM(AD[*]) <= 3.0 || '
-                 '(RPT[*] = "lcr" && RPT[*] = "rmsk")')
-    expr_min0 = ('SUM(AD[*]) < 15 || '
-                 'PL[0] / SUM(AD[*]) <= 3.0')
-    expr_all = 'GC < 1.0'
-    expr = expr_max
-    out_file = "%s-filter%s" % utils.splitext_plus(orig_file)
+    exprs = {}
+    exprs["max"] = ('SUM(AD[*]) < 15 || '
+                    'PL[0] / SUM(AD[*]) <= 3.0 || '
+                    'GC < 20.0 || GC > 77.0 || '
+                    'RPT[*] = "rmsk" || '
+                    'RPT[*] = "lcr"')
+    exprs["min2"] = ('SUM(AD[*]) < 15 || '
+                     'PL[0] / SUM(AD[*]) <= 3.0 || '
+                     'RPT[*] = "lcr"')
+    exprs["min1"] = ('SUM(AD[*]) < 15 || '
+                     'PL[0] / SUM(AD[*]) <= 3.0 || '
+                     '(RPT[*] = "lcr" && RPT[*] = "rmsk")')
+    exprs["min0"] = ('SUM(AD[*]) < 15 || '
+                     'PL[0] / SUM(AD[*]) <= 3.0')
+    exprs["all"] = 'GC < 1.0'
+    expr = exprs[ftype]
+    base, ext = utils.splitext_plus(orig_file)
+    out_file = "%s-filter%s%s" % (base, ftype, ext)
     if not utils.file_exists(out_file):
         with file_transaction({}, out_file) as tx_out_file:
             cmd = ("bcftools filter -O z -o {tx_out_file} "
-                   "-e '{expr}' -s 'ColorCustom' {orig_file}")
+                   "-m '+' -e '{expr}' -s '{name}' {orig_file}")
             do.run(cmd.format(**locals()), "Hard filter VCF")
     vcfutils.bgzip_and_index(out_file, {})
     def count(f):
@@ -570,7 +586,7 @@ def _find_bam_file(vcf_file, bam_files):
 
 # ## Calculate statistics on filtered variants versus discordants
 
-def _filtered_incon_stats(summary_txt, vcf_files):
+def _filtered_incon_stats(summary_txt, vcf_files, name, header):
     """Identify number of filtered variants versus identified discordants.
     """
     incon_rs = set()
@@ -580,23 +596,35 @@ def _filtered_incon_stats(summary_txt, vcf_files):
             if len(set(list(cmpstr))) > 1:
                 for pos in range(int(start), int(start) + len(ref)):
                     incon_rs.add((chrom, pos))
-    for vcf_file in vcf_files:
-        counts = {"tp": 0, "fp": 0, "fn": 0, "tn": 0}
+    out = []
+    for i, vcf_file in enumerate(vcf_files):
+        counts = {"tp": 0, "fn": {"remove_depth": 0, "remove_region": 0, "review": 0},
+                  "fp": 0, "tn": {"remove_depth" : 0, "remove_region": 0, "review": 0}}
         with gzip.open(vcf_file) as in_handle:
             for parts in (l.split() for l in in_handle if not l.startswith("#")):
                 filtered = parts[6] != "PASS"
                 position = (parts[0], int(parts[1]))
                 if filtered:
-                    if position in incon_rs:
-                        counts["tp"] += 1
+                    if "ColorRemoveDepth" in parts[6]:
+                        filtername = "remove_depth"
+                    elif "ColorRemoveRegion" in parts[6]:
+                        filtername = "remove_region"
                     else:
-                        counts["fn"] += 1
+                        filtername = "review"
+                    if position in incon_rs:
+                        counts["tn"][filtername] += 1
+                    else:
+                        counts["fn"][filtername] += 1
                 else:
                     if position in incon_rs:
                         counts["fp"] += 1
                     else:
-                        counts["tn"] += 1
-        print vcf_file, counts
+                        counts["tp"] += 1
+        cur = ["%s-%s" % (name, i)]
+        for h in header:
+            cur.append(tz.get_in(h, counts))
+        out.append(cur)
+    return out
 
 # ## Get files to work on
 
