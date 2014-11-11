@@ -7,19 +7,19 @@ The analysis runs with a single command on the AWS machine with downloaded BAMs
 and VCFs. It uses an isolated bcbio installation to provide a Python
 installation with the libraries and third party tools:
 
-   export PATH=/encrypted/permanent/bcbio/bin:$PATH
-   git clone https://github.com/hbc/color.git
-   cd /encrypted/permanent/work
-   /encrypted/permanent/bcbio/anaconda/bin/python /path/to/color/scripts/identify_inconsistent.py /path/to/color/config/awsinputs.yaml
+     export PATH=/encrypted/permanent/bcbio/bin:$PATH
+     git clone https://github.com/hbc/color.git
+     cd /encrypted/permanent/work
+     /encrypted/permanent/bcbio/anaconda/bin/python /path/to/color/scripts/identify_inconsistent.py /path/to/color/config/awsinputs.yaml
 
 Beyond the inputs from Color (VCFs, BAMs and BED file of regions) we also use
 two annotation files. They are located in `/encrypted/permanent/regions` and you
 can fetch them from scratch with:
 
-   wget -O - https://s3.amazonaws.com/gemini-annotations/hg19.rmsk.bed.gz | gunzip -c | sed 's/^chr//' | bgzip -c > GRCh37.rmsk.bed.gz
-   tabix -f -p bed GRCh37.rmsk.bed.gz
-   wget -O - https://github.com/lh3/varcmp/raw/master/scripts/LCR-hs37d5.bed.gz | gunzip -c | bgzip -c > LCR.bed.gz
-   tabix -f -p bed LCR.bed.gz
+     wget -O - https://s3.amazonaws.com/gemini-annotations/hg19.rmsk.bed.gz | gunzip -c | sed 's/^chr//' | bgzip -c > GRCh37.rmsk.bed.gz
+     tabix -f -p bed GRCh37.rmsk.bed.gz
+     wget -O - https://github.com/lh3/varcmp/raw/master/scripts/LCR-hs37d5.bed.gz | gunzip -c | bgzip -c > LCR.bed.gz
+     tabix -f -p bed LCR.bed.gz
 
 Data files
 ----------
