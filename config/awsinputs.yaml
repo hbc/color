@@ -15,6 +15,11 @@ annotations:
   rmsk: /encrypted/permanent/regions/GRCh37.rmsk.bed.gz
   lcr: /encrypted/permanent/regions/LCR.bed.gz
   # grc_patch: /encrypted/permanent/regions/GRC_patch_regions.bed.gz
+# Filters to apply. Comment out to get full discordants with no filtering
+filters:
+  - [min0, ColorRemoveDepth]
+  - [min1, ColorRemoveRegion]
+  - [max, ColorReview]
 # Swapped files and group names
 remap:
   BH9TK7ADXX_DS-159807_AAGGTAC: DS-159815

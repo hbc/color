@@ -33,7 +33,8 @@ def main(config_file):
                       tz.get_in(["inputs", "namere"], config), groups, config["remap"])
     bed_file = bedutils.clean_file(tz.get_in(["inputs", "regions"], config), config) + ".gz"
     with utils.chdir(tz.get_in(["dirs", "work"], config)):
-        groups = preprocess_vcfs(groups, bed_file, config["resources"], config["annotations"])
+        groups = preprocess_vcfs(groups, bed_file, config["resources"], config["annotations"],
+                                 config.get("filters", []))
         #pprint.pprint(groups)
         incon = {}
         for name, fnames in groups.items():
@@ -406,7 +407,7 @@ def investigate_high_counts(summary_file, vcf_files):
 
 # ## Pre-processing
 
-def preprocess_vcfs(groups, bed_file, resources, annotations):
+def preprocess_vcfs(groups, bed_file, resources, annotations, filters):
     """Pre-process VCFs to ensure they are bgzipped and tabix indexed.
     """
     out_dir = utils.safe_makedir(os.path.join(os.getcwd(), "prep"))
@@ -425,12 +426,13 @@ def preprocess_vcfs(groups, bed_file, resources, annotations):
             orig_vcfs.append(prep_file)
             ann_file = _annotate_vcf(prep_file, _find_bam_file(prep_file,  fnames.get("bam", [])),
                                      bed_file, resources)
-            ann2_file = _annotate_repeats(ann_file, annotations, resources.get("ref_file"))
-            filter1_file, cur_stats = _filter_vcf(ann2_file, "min0", "ColorRemoveDepth")
-            filter2_file, _ = _filter_vcf(filter1_file, "min1", "ColorRemoveRegion")
-            filter_file, _ = _filter_vcf(filter2_file, "max", "ColorReview")
-            filter_stats.append(cur_stats)
-            prep_vcfs.append(filter_file)
+            out_file = _annotate_repeats(ann_file, annotations, resources.get("ref_file"))
+            cur_stats = None
+            for ftype, fname in filters:
+                out_file, cur_stats = _filter_vcf(out_file, ftype, fname)
+            if cur_stats:
+                filter_stats.append(cur_stats)
+            prep_vcfs.append(out_file)
         orig_incon = find_inconsistent(name, orig_vcfs, bed_file, "compareorig")
         persample_stats.extend(_filtered_incon_stats(orig_incon["summary"], prep_vcfs, name, header))
         assert None not in prep_vcfs
@@ -448,14 +450,15 @@ def _write_filtered_counts(stats, header):
             writer.writerow(stat)
 
 def _analyze_filtered_stats(stats):
-    pcts = [x["pct"] for x in stats]
-    origs = [x["orig"] for x in stats]
-    finals = [x["final"] for x in stats]
-    removed = [x["orig"] - x["final"] for x in stats]
-    print "Removed percent. range: %.1f%%-%.1f%%; median: %.1f%%" % (min(pcts), max(pcts), np.median(pcts))
-    print "Removed counts. range: %s-%s; median: %s" % (min(removed), max(removed), np.median(removed))
-    print "Original counts. range: %s-%s; median: %s" % (min(origs), max(origs), np.median(origs))
-    print "Final counts. range: %s-%s; median: %s" % (min(finals), max(finals), np.median(finals))
+    if stats:
+        pcts = [x["pct"] for x in stats]
+        origs = [x["orig"] for x in stats]
+        finals = [x["final"] for x in stats]
+        removed = [x["orig"] - x["final"] for x in stats]
+        print "Removed percent. range: %.1f%%-%.1f%%; median: %.1f%%" % (min(pcts), max(pcts), np.median(pcts))
+        print "Removed counts. range: %s-%s; median: %s" % (min(removed), max(removed), np.median(removed))
+        print "Original counts. range: %s-%s; median: %s" % (min(origs), max(origs), np.median(origs))
+        print "Final counts. range: %s-%s; median: %s" % (min(finals), max(finals), np.median(finals))
 
 def _prep_vcf(in_file, out_file):
     if not utils.file_exists(out_file):
@@ -513,6 +516,7 @@ def _annotate_repeats(vcf_file, annotations, ref_file):
             cmd = ("bcftools annotate -a {prep_bed} -c CHROM,FROM,TO,RPT "
                    "-h {header_file} {vcf_file} -O z -o {tx_out_file}")
             do.run(cmd.format(**locals()), "Annotate input variants with repeats")
+    vcfutils.bgzip_and_index(out_file, {})
     return out_file
 
 def _prep_annotations(annotations, ref_file):
@@ -602,7 +606,7 @@ def _filtered_incon_stats(summary_txt, vcf_files, name, header):
                   "fp": 0, "tn": {"remove_depth" : 0, "remove_region": 0, "review": 0}}
         with gzip.open(vcf_file) as in_handle:
             for parts in (l.split() for l in in_handle if not l.startswith("#")):
-                filtered = parts[6] != "PASS"
+                filtered = parts[6] not in set(["PASS", "."])
                 position = (parts[0], int(parts[1]))
                 if filtered:
                     if "ColorRemoveDepth" in parts[6]:
