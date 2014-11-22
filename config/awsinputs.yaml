@@ -5,6 +5,7 @@ inputs:
   regions: /encrypted/permanent/color_panel_21.bed
   vcfs: /encrypted/permanent/vcf/*DS-15*vcf.gz
   bams: /encrypted/permanent/bams/*DS-15*.bam
+  cnvs: /encrypted/permanent/FF1-July-2014+labcorp-sept2014-1.cnvs-to-import.bed
 resources:
   gatk: /encrypted/permanent/resources/GenomeAnalysisTK.jar
   ref_file: /encrypted/permanent/resources/GRCh37/seq/GRCh37.fa
