@@ -3,26 +3,27 @@
 inputs:
   namere: 'DS-15\d+'
   regions: /encrypted/permanent/color_panel_21.bed
-  vcfs: /encrypted/permanent/vcf/*DS-15*vcf.gz
-  bams: /encrypted/permanent/bams/*DS-15*.bam
+  vcfs:
+    - /encrypted/permanent/vcf/*DS-15*vcf.gz
+    - /encrypted/permanent/vcf/first_color_vcfs/*.vcf.gz
+  bams:
+    - /encrypted/permanent/bams/*DS-15*.bam
   cnvs: /encrypted/permanent/FF1-July-2014+labcorp-sept2014-1.cnvs-to-import.bed
 resources:
   gatk: /encrypted/permanent/resources/GenomeAnalysisTK.jar
   ref_file: /encrypted/permanent/resources/GRCh37/seq/GRCh37.fa
-dirs:
-  work: /encrypted/permanent/work
 annotations:
-  #segdup: /encrypted/permanent/regions/GRCh37.segdup.bed.gz
   rmsk: /encrypted/permanent/regions/GRCh37.rmsk.bed.gz
   lcr: /encrypted/permanent/regions/LCR.bed.gz
-  # grc_patch: /encrypted/permanent/regions/GRC_patch_regions.bed.gz
+  #segdup: /encrypted/permanent/regions/GRCh37.segdup.bed.gz
+  #grc_patch: /encrypted/permanent/regions/GRC_patch_regions.bed.gz
 # Filters to apply. Comment out to get full discordants with no filtering
 filters:
   - [min0, ColorRemoveDepth]
   - [min1, ColorRemoveRegion]
   - [max, ColorReview]
-# Swapped files and group names
 remap:
+  # Swapped files and group names
   BH9TK7ADXX_DS-159807_AAGGTAC: DS-159815
   BH9TK7ADXX_DS-159807_ACGTATC: DS-159815
   BH9TK7ADXX_DS-159822_ACTATGC: DS-156119

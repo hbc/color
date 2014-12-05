@@ -27,45 +27,45 @@ def main(config_file):
     with open(config_file) as in_handle:
         config = yaml.load(in_handle)
     config["config"] = {}
-    groups = organize_vcf_reps(glob.glob(tz.get_in(["inputs", "vcfs"], config)),
+    groups = organize_vcf_reps(tz.get_in(["inputs", "vcfs"], config),
                                tz.get_in(["inputs", "namere"], config), config["remap"])
-    groups = add_bams(glob.glob(tz.get_in(["inputs", "bams"], config)),
+    groups = add_bams(tz.get_in(["inputs", "bams"], config),
                       tz.get_in(["inputs", "namere"], config), groups, config["remap"])
     bed_file = bedutils.clean_file(tz.get_in(["inputs", "regions"], config), config) + ".gz"
-    with utils.chdir(tz.get_in(["dirs", "work"], config)):
-        groups = preprocess_vcfs(groups, bed_file, config["resources"], config["annotations"],
-                                 config.get("filters", []))
-        #pprint.pprint(groups)
-        incon = {}
-        for name, fnames in groups.items():
-            incon[name] = find_inconsistent(name, fnames["vcf"], bed_file)
-        incon_check, totals, counts = [], [], []
-        for name, info in sorted(incon.items(), key=lambda x: np.mean(x[1]["counts"]), reverse=True):
-            totals.extend(info["totals"])
-            counts.extend(info["counts"])
-            print name, info["counts"]
-            if np.mean(info["counts"]) > 100:
-                incon_check.extend(investigate_high_counts(info["summary"], info["vcf_files"]))
-        totalm = np.median(totals)
-        countm = np.median(counts)
-        print "Overall discordants: %s-%s; %s-%s; %s / %s => %.1f%%" % (min(counts), max(counts),
-                                                                        min(totals), max(totals),
-                                                                        countm, totalm, countm * 100.0 / totalm)
-        for to_check in incon_check:
-            deconvolute_inconsistent(to_check, groups, bed_file)
-        disc_bed, incon = identify_shared_discordants(incon)
-        filtered_bed = merge_filtered(incon)
-        # only use filtered since annotations supplied upstream now
-        #ann_bed = annotate_disc_bed(disc_bed, filtered_bed, config["annotations"])
-        #remain_disc = check_annotated_disc(ann_bed, incon, config["annotations"])
-        ann_bed = annotate_disc_bed(disc_bed, filtered_bed, {})
-        remain_disc = check_annotated_disc(ann_bed, incon, {})
-        summarize_remaining_disc(incon)
-        if len(remain_disc) < 10:
-            identify_discordant_reasons(remain_disc, incon)
 
-        calculate_annotation_overlap(bed_file, filtered_bed, config["annotations"])
-        #print ann_bed
+    groups = preprocess_vcfs(groups, bed_file, config["resources"], config["annotations"],
+                             config.get("filters", []))
+    #pprint.pprint(groups)
+    incon = {}
+    for name, fnames in groups.items():
+        incon[name] = find_inconsistent(name, fnames["vcf"], bed_file)
+    incon_check, totals, counts = [], [], []
+    for name, info in sorted(incon.items(), key=lambda x: np.mean(x[1]["counts"]), reverse=True):
+        totals.extend(info["totals"])
+        counts.extend(info["counts"])
+        print name, info["counts"]
+        if np.mean(info["counts"]) > 100:
+            incon_check.extend(investigate_high_counts(info["summary"], info["vcf_files"]))
+    totalm = np.median(totals)
+    countm = np.median(counts)
+    print "Overall discordants: %s-%s; %s-%s; %s / %s => %.1f%%" % (min(counts), max(counts),
+                                                                    min(totals), max(totals),
+                                                                    countm, totalm, countm * 100.0 / totalm)
+    for to_check in incon_check:
+        deconvolute_inconsistent(to_check, groups, bed_file)
+    disc_bed, incon = identify_shared_discordants(incon)
+    filtered_bed = merge_filtered(incon)
+    # only use filtered since annotations supplied upstream now
+    #ann_bed = annotate_disc_bed(disc_bed, filtered_bed, config["annotations"])
+    #remain_disc = check_annotated_disc(ann_bed, incon, config["annotations"])
+    ann_bed = annotate_disc_bed(disc_bed, filtered_bed, {})
+    remain_disc = check_annotated_disc(ann_bed, incon, {})
+    summarize_remaining_disc(incon)
+    if len(remain_disc) < 10:
+        identify_discordant_reasons(remain_disc, incon)
+
+    calculate_annotation_overlap(bed_file, filtered_bed, config["annotations"])
+    #print ann_bed
 
 # ## Identify causes of discordance with filters
 
@@ -632,22 +632,23 @@ def _filtered_incon_stats(summary_txt, vcf_files, name, header):
 
 # ## Get files to work on
 
-def add_bams(bam_files, name_re, groups, remap):
+def add_bams(bam_res, name_re, groups, remap):
     """Add BAM information existing grouped VCFs.
     """
     pat = re.compile(name_re)
-    for bam_file in bam_files:
-        try:
-            name = remap[utils.splitext_plus(os.path.basename(bam_file))[0]]
-        except KeyError:
-            name = pat.search(os.path.basename(bam_file)).group(0)
-        if name in groups:
-            cur_group = groups[name]
+    for bam_re in glob.glob(bam_res):
+        for bam_file in bam_files:
             try:
-                cur_group["bam"].append(bam_file)
+                name = remap[utils.splitext_plus(os.path.basename(bam_file))[0]]
             except KeyError:
-                cur_group["bam"] = [bam_file]
-            groups[name] = cur_group
+                name = pat.search(os.path.basename(bam_file)).group(0)
+            if name in groups:
+                cur_group = groups[name]
+                try:
+                    cur_group["bam"].append(bam_file)
+                except KeyError:
+                    cur_group["bam"] = [bam_file]
+                groups[name] = cur_group
     return groups
 
 def organize_vcf_reps(vcf_files, name_re, remap):
@@ -655,12 +656,13 @@ def organize_vcf_reps(vcf_files, name_re, remap):
     """
     pat = re.compile(name_re)
     by_name = collections.defaultdict(list)
-    for vcf_file in vcf_files:
-        try:
-            name = remap[utils.splitext_plus(os.path.basename(vcf_file))[0]]
-        except KeyError:
-            name = pat.search(os.path.basename(vcf_file)).group(0)
-        by_name[name].append(vcf_file)
+    for vcf_re in vcf_res:
+        for vcf_file in glob.glob(vcf_re):
+            try:
+                name = remap[utils.splitext_plus(os.path.basename(vcf_file))[0]]
+            except KeyError:
+                name = pat.search(os.path.basename(vcf_file)).group(0)
+            by_name[name].append(vcf_file)
     out = {}
     for name, vcfs in by_name.items():
         if len(vcfs) > 1:
