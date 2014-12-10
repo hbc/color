@@ -5,6 +5,7 @@ import collections
 import csv
 import glob
 import gzip
+import math
 import pprint
 import os
 import re
@@ -27,6 +28,7 @@ def main(config_file):
     with open(config_file) as in_handle:
         config = yaml.load(in_handle)
     config["config"] = {}
+    config["dirs"] = {"work": os.getcwd()}
     groups = organize_vcf_reps(tz.get_in(["inputs", "vcfs"], config),
                                tz.get_in(["inputs", "namere"], config), config["remap"])
     groups = add_bams(tz.get_in(["inputs", "bams"], config),
@@ -38,7 +40,7 @@ def main(config_file):
     #pprint.pprint(groups)
     incon = {}
     for name, fnames in groups.items():
-        incon[name] = find_inconsistent(name, fnames["vcf"], bed_file)
+        incon[name] = find_inconsistent(name, fnames["vcf"], bed_file, config["resources"])
     incon_check, totals, counts = [], [], []
     for name, info in sorted(incon.items(), key=lambda x: np.mean(x[1]["counts"]), reverse=True):
         totals.extend(info["totals"])
@@ -306,7 +308,7 @@ def _prep_discordant_line(line, name, require_different=True):
 
 # ## Comparisons
 
-def find_inconsistent(name, vcf_files, bed_file, dirname="compare"):
+def find_inconsistent(name, vcf_files, bed_file, resources, dirname="compare"):
     """Find inconsistent calls in provided regions of interest for each group.
     """
     cmp_dir = utils.safe_makedir(os.path.join(os.getcwd(), dirname, name))
@@ -318,22 +320,24 @@ def find_inconsistent(name, vcf_files, bed_file, dirname="compare"):
             cmd = ("bcftools isec -f 'PASS,.' {vcf_files_str} -R {bed_file} "
                    "-n -{target_count} -p {tx_isec_dir} -O z")
             do.run(cmd.format(**locals()), "Intersection finding non-consistent calls")
-    isec_summary = _calculate_summary(vcf_files, bed_file, cmp_dir)
+    isec_summary = _calculate_summary(vcf_files, bed_file, cmp_dir, resources["ref_file"], name)
     excluded = _calculate_excluded(vcf_files, bed_file, cmp_dir, name)
     inconsistent = []
     totals = []
     for i, vcf_file in enumerate(vcf_files):
-        with gzip.open(os.path.join(isec_dir, "%04d.vcf.gz" % i)) as in_handle:
-            inconsistent.append(sum(1 for l in in_handle if not l.startswith("#")))
-        with gzip.open(vcf_file) as in_handle:
-            totals.append(sum(1 for l in in_handle if not l.startswith("#")))
+        incon_file = os.path.join(isec_dir, "%04d.vcf.gz" % i)
+        if os.path.exists(incon_file):
+            with gzip.open(incon_file) as in_handle:
+                inconsistent.append(sum(1 for l in in_handle if not l.startswith("#")))
+            with gzip.open(vcf_file) as in_handle:
+                totals.append(sum(1 for l in in_handle if not l.startswith("#")))
     return {"counts": inconsistent,
             "totals": totals,
             "vcf_files": vcf_files,
             "summary": isec_summary,
             "excluded": excluded}
 
-def _calculate_summary(vcf_files, bed_file, cmp_dir):
+def _calculate_summary(vcf_files, bed_file, cmp_dir, ref_file, name):
     """Summarize all variants called in the VCF files as a bcftools isec output file.
     """
     file_list = os.path.join(cmp_dir, "input_files.txt")
@@ -347,6 +351,19 @@ def _calculate_summary(vcf_files, bed_file, cmp_dir):
             vcf_files_str = " ".join(vcf_files)
             cmd = ("bcftools isec -f 'PASS,.' -n '+1' -o {tx_out_file} -R {bed_file} {vcf_files_str}")
             do.run(cmd.format(**locals()), "Variant comparison summary")
+    eout_file = os.path.join(cmp_dir, "%s-ensemble.vcf.gz" % name)
+    if not utils.file_exists(eout_file):
+        with file_transaction({}, eout_file) as tx_out_file:
+            num_samples = int(math.ceil(len(vcf_files) / 2.0))
+            cmd = ["bcbio-variation-recall", "ensemble", "-n", num_samples, "--nofiltered",
+                   eout_file, ref_file] + vcf_files
+            do.run(cmd, "Calculate ensemble summary call for a sample")
+    eout_final_file = "%s-ready%s" % utils.splitext_plus(eout_file)
+    if not utils.file_exists(eout_final_file):
+        with file_transaction({}, eout_final_file) as tx_out_file:
+            cmd = r"gunzip -c {eout_file} | sed 's/FORMAT\t.*$/FORMAT\t{name}/' | bgzip -c > {tx_out_file}"
+            do.run(cmd.format(**locals()), "Fix VCF output")
+    vcfutils.bgzip_and_index(eout_final_file, {})
     return out_file
 
 def _calculate_excluded(vcf_files, bed_file, cmp_dir, name):
@@ -433,7 +450,7 @@ def preprocess_vcfs(groups, bed_file, resources, annotations, filters):
             if cur_stats:
                 filter_stats.append(cur_stats)
             prep_vcfs.append(out_file)
-        orig_incon = find_inconsistent(name, orig_vcfs, bed_file, "compareorig")
+        orig_incon = find_inconsistent(name, orig_vcfs, bed_file, resources, "compareorig")
         persample_stats.extend(_filtered_incon_stats(orig_incon["summary"], prep_vcfs, name, header))
         assert None not in prep_vcfs
         groups[name]["vcf"] = prep_vcfs
@@ -636,8 +653,8 @@ def add_bams(bam_res, name_re, groups, remap):
     """Add BAM information existing grouped VCFs.
     """
     pat = re.compile(name_re)
-    for bam_re in glob.glob(bam_res):
-        for bam_file in bam_files:
+    for bam_re in bam_res:
+        for bam_file in glob.glob(bam_re):
             try:
                 name = remap[utils.splitext_plus(os.path.basename(bam_file))[0]]
             except KeyError:
@@ -651,7 +668,7 @@ def add_bams(bam_res, name_re, groups, remap):
                 groups[name] = cur_group
     return groups
 
-def organize_vcf_reps(vcf_files, name_re, remap):
+def organize_vcf_reps(vcf_res, name_re, remap):
     """Retrieve VCFs analyzed as replicates.
     """
     pat = re.compile(name_re)
@@ -659,8 +676,9 @@ def organize_vcf_reps(vcf_files, name_re, remap):
     for vcf_re in vcf_res:
         for vcf_file in glob.glob(vcf_re):
             try:
-                name = remap[utils.splitext_plus(os.path.basename(vcf_file))[0]]
+                name = remap[utils.splitext_plus(os.path.basename(vcf_file))[0].replace("vcf", "")]
             except KeyError:
+                print "No Coriell name", vcf_file
                 name = pat.search(os.path.basename(vcf_file)).group(0)
             by_name[name].append(vcf_file)
     out = {}
